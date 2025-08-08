@@ -12,5 +12,8 @@ namespace Kanban.Api.DTOs
 
         [Required]
         public int Order { get; set; }
+        
+        [Required]
+        public int ColumnId { get; set; }
     }
 }

@@ -25,6 +25,16 @@ export default function BoardDetail() {
   const [editColName, setEditColName]   = useState('');
   const [editColOrder, setEditColOrder] = useState(0);
 
+  // For “Add Card” forms (one form per column)
+  const [showCardFormFor, setShowCardFormFor] = useState<number | null>(null);
+  const [newCardTitle, setNewCardTitle]       = useState('');
+  const [newCardDesc, setNewCardDesc]         = useState('');
+  
+  // For editing cards
+  const [editingCardId, setEditingCardId]     = useState<number | null>(null);
+  const [editCardTitle, setEditCardTitle]     = useState('');
+  const [editCardDesc, setEditCardDesc]       = useState('');
+  
   // 1️⃣ Fetch board on mount
   useEffect(() => {
     if (!id) return navigate('/');
@@ -39,35 +49,141 @@ export default function BoardDetail() {
   if (!board) return <div>Loading...</div>;
 
   // 2️⃣ Handle drag end
-  const onDragEnd = async (result: DropResult) => {
-    const { source, destination, draggableId } = result;
-    if (!destination) return;
+  // inside your component:
+const onDragEnd = async (result: DropResult) => {
+  const { source, destination, draggableId } = result;
+  if (!destination) return;
 
-    // If dropped in the same spot, do nothing
-    if (
-      source.droppableId === destination.droppableId &&
-      source.index === destination.index
-    ) return;
+  const fromColId = parseInt(source.droppableId);
+  const toColId   = parseInt(destination.droppableId);
 
-    // Find source & dest columns
-    const srcCol = board.columns.find(c => c.id.toString() === source.droppableId)!;
-    const dstCol = board.columns.find(c => c.id.toString() === destination.droppableId)!;
+  // no-op if nothing changed
+  if (fromColId === toColId && source.index === destination.index) return;
 
-    // Remove card from src
-    const [moved] = srcCol.cards.splice(source.index, 1);
-    // Insert into dest
-    dstCol.cards.splice(destination.index, 0, moved);
+  // 1) Clone your board state deeply
+  const newColumns = board.columns.map(col => ({
+    ...col,
+    cards: [...col.cards]
+  }));
 
-    // Update local state to rerender
-    setBoard({ ...board });
+  // 2) Remove the moved card from its source column
+  const sourceCol = newColumns.find(c => c.id === fromColId)!;
+  const [movedCard] = sourceCol.cards.splice(source.index, 1);
 
-    // Persist: update only the moved card’s columnId + order
-    await api.put(`/cards/${moved.id}`, {
-      title:       moved.title,
-      description: moved.description,
-      order:       destination.index,
-      columnId:    dstCol.id
+  // 3) Insert it into the destination column
+  const destCol = newColumns.find(c => c.id === toColId)!;
+  destCol.cards.splice(destination.index, 0, movedCard);
+
+  // 4) Reindex orders in both affected columns
+  const affectedCols = [sourceCol, destCol];
+  affectedCols.forEach(col => {
+    col.cards.forEach((card, idx) => {
+      card.order = idx;
+      // if it's the moved card, also update its columnId
+      if (card.id === movedCard.id) {
+        card.columnId = toColId;
+      }
     });
+  });
+
+  // 5) Update React state immediately
+  setBoard(b => b ? { ...b, columns: newColumns } : b);
+
+  // 6) Persist changes: moved card (and optionally other re-ordered cards)
+  try {
+    // Update the moved card first
+    await api.put(`/cards/${movedCard.id}`, {
+      title:       movedCard.title,
+      description: movedCard.description,
+      order:       movedCard.order,
+      columnId:    movedCard.columnId
+    });
+
+    // If you want to persist the re-indexed orders of *all* cards in the two columns,
+    // you can batch those here. For simplicity, at least update the moved card.
+  } catch (err) {
+    console.error('Failed to persist drag-and-drop:', err);
+  }
+};
+
+  // CREATE
+  const handleCreateCard = async (e: React.FormEvent, columnId: number) => {
+    e.preventDefault();
+    const order = board.columns
+      .find(c => c.id === columnId)!.cards.length;
+  
+    const dto = {
+      title:       newCardTitle,
+      description: newCardDesc,
+      order,
+      columnId
+    };
+  
+    const { data: created } = await api.post<CardDto>('/cards', dto);
+  
+    setBoard(prev => prev && ({
+      ...prev,
+      columns: prev.columns.map(col =>
+        col.id === columnId
+          ? { ...col, cards: [...col.cards, created] }
+          : col
+      )
+    }));
+  
+    setNewCardTitle('');
+    setNewCardDesc('');
+    setShowCardFormFor(null);
+  };
+  
+  // DELETE
+  const handleDeleteCard = async (card: CardDto) => {
+    if (!confirm('Delete this card?')) return;
+    await api.delete(`/cards/${card.id}`);
+    setBoard(prev => prev && ({
+      ...prev,
+      columns: prev.columns.map(col => ({
+        ...col,
+        cards: col.cards.filter(c => c.id !== card.id)
+      }))
+    }));
+  };
+  
+  // START EDIT
+  const startEditCard = (card: CardDto) => {
+    setEditingCardId(card.id);
+    setEditCardTitle(card.title);
+    setEditCardDesc(card.description);
+  };
+  
+  // CANCEL EDIT
+  const cancelEditCard = () => {
+    setEditingCardId(null);
+    setEditCardTitle('');
+    setEditCardDesc('');
+  };
+  
+  // SAVE UPDATE
+  const handleUpdateCard = async (e: React.FormEvent, card: CardDto) => {
+    e.preventDefault();
+    const dto = {
+      title:       editCardTitle,
+      description: editCardDesc,
+      order:       card.order,
+      columnId:    card.columnId
+    };
+    await api.put<CardDto>(`/cards/${card.id}`, dto);
+    setBoard(prev => prev && ({
+      ...prev,
+      columns: prev.columns.map(col => ({
+        ...col,
+        cards: col.cards.map(c =>
+          c.id === card.id
+            ? { ...c, title: editCardTitle, description: editCardDesc }
+            : c
+        )
+      }))
+    }));
+    cancelEditCard();
   };
 
   // CREATE
@@ -215,17 +331,82 @@ export default function BoardDetail() {
                             ...dragProvided.draggableProps.style
                           }}
                         >
+                        {editingCardId === card.id ? (
+                            // Edit form
+                            <form onSubmit={e => handleUpdateCard(e, card)}>
+                              <input
+                                value={editCardTitle}
+                                onChange={e => setEditCardTitle(e.target.value)}
+                                required
+                                style={{ width: '100%' }}
+                              />
+                              <textarea
+                                value={editCardDesc}
+                                onChange={e => setEditCardDesc(e.target.value)}
+                                rows={2}
+                                style={{ width: '100%', marginTop: 4 }}
+                              />
+                              <button type="submit">Save</button>
+                              <button type="button" onClick={cancelEditCard} style={{ marginLeft: 4 }}>
+                                Cancel
+                              </button>
+                            </form>
+                        ) : (
+                          // Display card + actions
+                          <>
                           <strong>{card.title}</strong>
                           <p>{card.description}</p>
+                          <div style={{ textAlign: 'right' }}>
+                             <button onClick={() => startEditCard(card)} style={{ marginRight: 4 }}>
+                               ✏️
+                             </button>
+                             <button onClick={() => handleDeleteCard(card)}>
+                               🗑️
+                             </button>
+                           </div>
+                         </>
+                         )}
                         </div>
                       )}
                     </Draggable>
                   ))}
                   {provided.placeholder}
+                  <div style={{ marginTop: 8 }}>
+                  {showCardFormFor === col.id ? (
+                    <form onSubmit={e => handleCreateCard(e, col.id)}>
+                      <input
+                        placeholder="Card title"
+                        value={newCardTitle}
+                        onChange={e => setNewCardTitle(e.target.value)}
+                        required
+                        style={{ width: '100%' }}
+                      />
+                      <textarea
+                        placeholder="Description"
+                        value={newCardDesc}
+                        onChange={e => setNewCardDesc(e.target.value)}
+                        rows={2}
+                        style={{ width: '100%', marginTop: 4 }}
+                      />
+                      <button type="submit">Add</button>
+                      <button
+                        type="button"
+                        onClick={() => setShowCardFormFor(null)}
+                        style={{ marginLeft: 4 }}
+                      >
+                        Cancel
+                      </button>
+                    </form>
+                  ) : (
+                    <button onClick={() => setShowCardFormFor(col.id)}>
+                      + Add Card
+                    </button>
+                  )}
+                 </div>
                 </div>
               )}
             </Droppable>
-          ))}
+          ))}          
         </div>
       </DragDropContext>
     </div>

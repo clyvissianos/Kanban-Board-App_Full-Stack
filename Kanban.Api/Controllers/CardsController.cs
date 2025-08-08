@@ -1,6 +1,7 @@
 ﻿using AutoMapper;
 using Kanban.Api.Data;
 using Kanban.Api.DTOs;
+using Kanban.Api.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -52,6 +53,30 @@ namespace Kanban.Api.Controllers
             }
 
             return Ok(_mapper.Map<CardDto>(card));
+        }
+
+        // **NEW** POST /api/cards
+        [HttpPost]
+        public async Task<ActionResult<CardDto>> Create(CreateCardDto dto)
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            // Optional: validate column exists and belongs to this user
+            var column = await _db.Columns
+                .Include(c => c.Board)
+                .FirstOrDefaultAsync(c => c.Id == dto.ColumnId && c.Board.OwnerId == userId);
+            if (column == null) return BadRequest("Invalid column");
+
+            var card = _mapper.Map<Card>(dto);
+            card.CreatedAt = DateTime.UtcNow;
+            card.UpdatedAt = DateTime.UtcNow;
+
+            _db.Cards.Add(card);
+            await _db.SaveChangesAsync();
+
+            // Optionally re-fetch with navigation for mapping
+            var result = _mapper.Map<CardDto>(card);
+            return CreatedAtAction(nameof(Get), new { id = card.Id }, result);
         }
 
         // GET: Cards/Create
